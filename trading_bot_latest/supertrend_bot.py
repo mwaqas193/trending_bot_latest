@@ -170,5 +170,6 @@ if __name__ == '__main__':
     # Launch the bot in a background thread
     Thread(target=start_bot, daemon=True).start()
     # Bind Flask server to Render's PORT
-    port = int(os.getenv('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    port = int(os.getenv('PORT', 5001))
+    app.run(host='0.0.0.0', port=port) 
+ 
