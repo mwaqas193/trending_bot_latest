@@ -431,7 +431,7 @@ if __name__ == '__main__':
     # Start Flask server in a separate thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    
+     
     
     # Initialize and run the trading bot
     bot = SupertrendBot(
