@@ -171,5 +171,5 @@ if __name__ == '__main__':
     Thread(target=start_bot, daemon=True).start()
     # Bind Flask server to Render's PORT
     port = int(os.getenv('PORT', 5001))
-    app.run(host='0.0.0.0', port=port) 
- 
+    app.run(host='0.0.0.0', port=port)  
+  
