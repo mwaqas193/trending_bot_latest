@@ -442,4 +442,4 @@ if __name__ == '__main__':
         fee_pct=0.001,
         discord_webhook_url=os.getenv('DISCORD_WEBHOOK_URL')
     )
-    bot.run_live() 
+    bot.run_live()  
