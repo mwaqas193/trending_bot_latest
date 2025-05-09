@@ -23,7 +23,11 @@ def health_check():
 def run_flask():
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 10000)))
 
-RESULT_DIR = 'supertrend_result'
+# Configure result directory for Render or local
+if 'RENDER' in os.environ:
+    RESULT_DIR = '/var/lib/render/supertrend_results'
+else:
+    RESULT_DIR = 'supertrend_result'
 os.makedirs(RESULT_DIR, exist_ok=True)
 
 class SupertrendBot:
@@ -152,119 +156,186 @@ class SupertrendBot:
         print("└──────────────────────────────────────────")
    
     def _update_reports(self):
-        start = self.start_balance or 0
-        df = pd.DataFrame(self.closed_positions)
+        try:
+            start = self.start_balance or 0
+            df = pd.DataFrame(self.closed_positions)
+            
+            # Initialize default values
+            total_pnl = 0
+            winning_trades = 0
+            avg_duration = 0
+            
+            if not df.empty:
+                if 'pnl' in df.columns:
+                    total_pnl = df['pnl'].sum()
+                    winning_trades = int((df['pnl'] > 0).sum())
+                if 'duration_min' in df.columns:
+                    avg_duration = df['duration_min'].mean()
 
-        overall = {
-            'initial_balance': start,
-            'current_balance': start + (df['pnl'].sum() if not df.empty else 0),
-            'total_pnl': df['pnl'].sum() if not df.empty else 0,
-            'return_pct': (df['pnl'].sum() / start * 100) if start else 0,
-            'total_trades': len(df),
-            'winning_trades': int((df['pnl'] > 0).sum()) if not df.empty else 0,
-            'win_rate': (df['pnl'] > 0).mean() * 100 if not df.empty else 0,
-            'avg_trade_duration': df['duration_min'].mean() if not df.empty else 0
-        }
-        pd.DataFrame([overall]).to_csv(os.path.join(RESULT_DIR, 'summary.csv'), index=False)
+            overall = {
+                'initial_balance': start,
+                'current_balance': start + total_pnl,
+                'total_pnl': total_pnl,
+                'return_pct': (total_pnl / start * 100) if start else 0,
+                'total_trades': len(df),
+                'winning_trades': winning_trades,
+                'win_rate': (winning_trades / len(df) * 100) if len(df) > 0 else 0,
+                'avg_trade_duration': avg_duration
+            }
 
-        if not df.empty:
-            df = df.copy()
-            df['size_usdt'] = df['entry_price'] * df['size']
-            df['exit_usdt'] = df['exit_price'] * df['size']
-            df['cumulative_pnl'] = df['pnl'].cumsum()
-            df['cumulative_pnl_pct'] = df['cumulative_pnl'] / start * 100
-            df.rename(columns={'fees': 'total_fees_usd'}, inplace=True)
-            df['cumulative_fees_usd'] = df['total_fees_usd'].cumsum()
+            # Save overall summary
+            try:
+                pd.DataFrame([overall]).to_csv(os.path.join(RESULT_DIR, 'summary.csv'), index=False)
+            except Exception as e:
+                print(f"[{datetime.now()}] ❌ Failed to save summary: {e}")
 
-            col_order = [
-                'symbol', 'entry_tf', 'entry_time', 'entry_price', 'size', 'size_usdt',
-                'exit_time', 'exit_price', 'exit_usdt', 'pnl', 'cumulative_pnl', 
-                'cumulative_pnl_pct', 'total_fees_usd', 'cumulative_fees_usd', 'duration_min'
-            ]
-            df[col_order].to_csv(os.path.join(RESULT_DIR, 'trades.csv'), index=False)
+            # Save detailed trades if they exist
+            if not df.empty:
+                try:
+                    df = df.copy()
+                    if 'entry_price' in df.columns and 'size' in df.columns:
+                        df['size_usdt'] = df['entry_price'] * df['size']
+                    if 'exit_price' in df.columns and 'size' in df.columns:
+                        df['exit_usdt'] = df['exit_price'] * df['size']
+                    if 'pnl' in df.columns:
+                        df['cumulative_pnl'] = df['pnl'].cumsum()
+                        df['cumulative_pnl_pct'] = df['cumulative_pnl'] / start * 100
+                    if 'fees' in df.columns:
+                        df.rename(columns={'fees': 'total_fees_usd'}, inplace=True)
+                        df['cumulative_fees_usd'] = df['total_fees_usd'].cumsum()
 
-            df['exit_dt'] = pd.to_datetime(df['exit_time'], unit='ms')
-            df['month'] = df['exit_dt'].dt.to_period('M').dt.to_timestamp()
-            monthly = df.groupby('month').agg(
-                total_pnl=('pnl', 'sum'),
-                total_trades=('pnl', 'size'),
-                winning_trades=('pnl', lambda x: int((x > 0).sum())),
-                win_rate=('pnl', lambda x: float(x.gt(0).mean() * 100)),
-                avg_trade_duration=('duration_min', 'mean'),
-                total_fees_usd=('total_fees_usd', 'sum'),
-            ).reset_index()
-            monthly['cumulative_pnl'] = monthly['total_pnl'].cumsum()
-            monthly['cumulative_pnl_pct'] = monthly['cumulative_pnl'] / start * 100
-            monthly['cumulative_fees_usd'] = monthly['total_fees_usd'].cumsum()
-            monthly['month'] = monthly['month'].dt.strftime('%Y-%m')
-            monthly.to_csv(os.path.join(RESULT_DIR, 'monthly_summary.csv'), index=False)
+                    col_order = [col for col in [
+                        'symbol', 'entry_tf', 'entry_time', 'entry_price', 'size', 'size_usdt',
+                        'exit_time', 'exit_price', 'exit_usdt', 'pnl', 'cumulative_pnl', 
+                        'cumulative_pnl_pct', 'total_fees_usd', 'cumulative_fees_usd', 'duration_min'
+                    ] if col in df.columns]
 
-            tf_df = df.copy()
-            tf_summary = tf_df.groupby('entry_tf').agg(
-                total_pnl_usd=('pnl', 'sum'),
-                total_fees_usd=('total_fees_usd', 'sum'),
-                total_trades=('pnl', 'size'),
-                winning_trades=('pnl', lambda x: int((x > 0).sum())),
-                losing_trades=('pnl', lambda x: int((x < 0).sum())),
-                avg_trade_duration_min=('duration_min', 'mean'),
-            ).reset_index().rename(columns={'entry_tf': 'timeframe'})
+                    df[col_order].to_csv(os.path.join(RESULT_DIR, 'trades.csv'), index=False)
+                except Exception as e:
+                    print(f"[{datetime.now()}] ❌ Failed to save trades: {e}")
 
-            order = {'1h': 0, '4h': 1, '1d': 2}
-            tf_summary['order'] = tf_summary['timeframe'].map(order).fillna(99)
-            tf_summary = tf_summary.sort_values('order').drop(columns='order')
-            tf_summary['cumulative_pnl_usd'] = tf_summary['total_pnl_usd'].cumsum()
-            tf_summary['cumulative_pnl_pct'] = tf_summary['cumulative_pnl_usd'] / start * 100
-            tf_summary['cumulative_fees_usd'] = tf_summary['total_fees_usd'].cumsum()
-            tf_summary['win_rate_pct'] = tf_summary['winning_trades'] / tf_summary['total_trades'] * 100
+                # Save monthly summary
+                try:
+                    if 'exit_time' in df.columns:
+                        df['exit_dt'] = pd.to_datetime(df['exit_time'], unit='ms')
+                        df['month'] = df['exit_dt'].dt.to_period('M').dt.to_timestamp()
+                        
+                        agg_dict = {
+                            'total_trades': ('pnl', 'size'),
+                            'avg_trade_duration': ('duration_min', 'mean')
+                        }
+                        
+                        if 'pnl' in df.columns:
+                            agg_dict['total_pnl'] = ('pnl', 'sum')
+                            agg_dict['winning_trades'] = ('pnl', lambda x: int((x > 0).sum()))
+                            agg_dict['win_rate'] = ('pnl', lambda x: float(x.gt(0).mean() * 100))
+                        
+                        if 'total_fees_usd' in df.columns:
+                            agg_dict['total_fees_usd'] = ('total_fees_usd', 'sum')
+                        
+                        monthly = df.groupby('month').agg(**agg_dict).reset_index()
+                        
+                        if 'total_pnl' in monthly.columns:
+                            monthly['cumulative_pnl'] = monthly['total_pnl'].cumsum()
+                            monthly['cumulative_pnl_pct'] = monthly['cumulative_pnl'] / start * 100
+                        if 'total_fees_usd' in monthly.columns:
+                            monthly['cumulative_fees_usd'] = monthly['total_fees_usd'].cumsum()
+                        
+                        monthly['month'] = monthly['month'].dt.strftime('%Y-%m')
+                        monthly.to_csv(os.path.join(RESULT_DIR, 'monthly_summary.csv'), index=False)
+                except Exception as e:
+                    print(f"[{datetime.now()}] ❌ Failed to save monthly summary: {e}")
 
-            tf_summary = tf_summary[
-                ['timeframe', 'total_pnl_usd', 'cumulative_pnl_usd', 'cumulative_pnl_pct',
-                 'total_fees_usd', 'cumulative_fees_usd', 'total_trades',
-                 'winning_trades', 'losing_trades', 'win_rate_pct', 'avg_trade_duration_min']
-            ]
-            tf_summary.to_csv(os.path.join(RESULT_DIR, 'timeframe_summary.csv'), index=False)
+                # Save timeframe summary
+                try:
+                    if 'entry_tf' in df.columns:
+                        tf_df = df.copy()
+                        agg_dict = {
+                            'total_trades': ('pnl', 'size'),
+                            'avg_trade_duration_min': ('duration_min', 'mean')
+                        }
+                        
+                        if 'pnl' in df.columns:
+                            agg_dict['total_pnl_usd'] = ('pnl', 'sum')
+                            agg_dict['winning_trades'] = ('pnl', lambda x: int((x > 0).sum()))
+                            agg_dict['losing_trades'] = ('pnl', lambda x: int((x < 0).sum()))
+                        
+                        if 'total_fees_usd' in df.columns:
+                            agg_dict['total_fees_usd'] = ('total_fees_usd', 'sum')
+                        
+                        tf_summary = tf_df.groupby('entry_tf').agg(**agg_dict).reset_index().rename(columns={'entry_tf': 'timeframe'})
+                        
+                        order = {'1h': 0, '4h': 1, '1d': 2}
+                        tf_summary['order'] = tf_summary['timeframe'].map(order).fillna(99)
+                        tf_summary = tf_summary.sort_values('order').drop(columns='order')
+                        
+                        if 'total_pnl_usd' in tf_summary.columns:
+                            tf_summary['cumulative_pnl_usd'] = tf_summary['total_pnl_usd'].cumsum()
+                            tf_summary['cumulative_pnl_pct'] = tf_summary['cumulative_pnl_usd'] / start * 100
+                        
+                        if 'total_fees_usd' in tf_summary.columns:
+                            tf_summary['cumulative_fees_usd'] = tf_summary['total_fees_usd'].cumsum()
+                        
+                        if 'winning_trades' in tf_summary.columns and 'total_trades' in tf_summary.columns:
+                            tf_summary['win_rate_pct'] = tf_summary['winning_trades'] / tf_summary['total_trades'] * 100
+                        
+                        tf_summary.to_csv(os.path.join(RESULT_DIR, 'timeframe_summary.csv'), index=False)
+                except Exception as e:
+                    print(f"[{datetime.now()}] ❌ Failed to save timeframe summary: {e}")
+
+        except Exception as e:
+            print(f"[{datetime.now()}] ❌ Error in report generation: {e}")
 
     def send_discord_report(self):
         if not self.discord_webhook:
             return
 
-        start = self.start_balance or 0
-        df = pd.DataFrame(self.closed_positions)
-        realised_pnl = df['pnl'].sum() if not df.empty and 'pnl' in df.columns else 0.0
-        wins = int((df['pnl'] > 0).sum()) if not df.empty else 0
-        losses = len(df) - wins if not df.empty else 0
-
-        unrealised_pnl = 0.0
-        for pos in self.open_positions.values():
-            curr_price = self.exchange.fetch_ticker(pos['symbol'])['last']
-            pnl = (curr_price - pos['entry_price']) * pos['size']
-            unrealised_pnl += pnl
-
-        current = start + realised_pnl
-        content = (
-            f"**Supertrend Bot Report**\n\n"
-            f"**Balance:** ${start:.2f} → ${current:.2f} ({realised_pnl:+.2f})\n"
-            f"**Performance:** {((current - start) / start * 100):.2f}%\n"
-            f"**Realised PnL:** ${realised_pnl:.2f}\n"
-            f"**Unrealised PnL:** ${unrealised_pnl:.2f}\n"
-            f"**Trades:** {len(df)} (W:{wins}, L:{losses})\n"
-            f"**Open Positions:** {len(self.open_positions)}/{self.max_positions}\n"
-        )
-
-        if self.open_positions:
-            content += "\n**Positions Detail:**\n"
-            for sym, pos in self.open_positions.items():
-                curr = self.exchange.fetch_ticker(sym)['last']
-                cost = pos['entry_price'] * pos['size']
-                pnl = (curr - pos['entry_price']) * pos['size']
-                roi = (pnl / cost * 100) if cost else 0
-                content += (
-                    f"• {sym} | TF:{pos['entry_tf']} | Size:{pos['size']:.6f}\n"
-                    f"  Entry:{pos['entry_price']:.4f} Curr:{curr:.4f} "
-                    f"PnL:${pnl:.2f} ({roi:.2f}%)\n"
-                )
-
         try:
+            start = self.start_balance or 0
+            df = pd.DataFrame(self.closed_positions)
+            
+            realised_pnl = df['pnl'].sum() if not df.empty and 'pnl' in df.columns else 0.0
+            wins = int((df['pnl'] > 0).sum()) if not df.empty and 'pnl' in df.columns else 0
+            losses = len(df) - wins if not df.empty else 0
+
+            unrealised_pnl = 0.0
+            for sym, pos in self.open_positions.items():
+                try:
+                    curr_price = self.exchange.fetch_ticker(pos['symbol'])['last']
+                    pnl = (curr_price - pos['entry_price']) * pos['size']
+                    unrealised_pnl += pnl
+                except Exception as e:
+                    print(f"[{datetime.now()}] ❌ Error calculating PnL for {pos['symbol']}: {e}")
+                    continue
+
+            current = start + realised_pnl
+            content = (
+                f"**Supertrend Bot Report**\n\n"
+                f"**Balance:** ${start:.2f} → ${current:.2f} ({realised_pnl:+.2f})\n"
+                f"**Performance:** {((current - start) / start * 100):.2f}%\n"
+                f"**Realised PnL:** ${realised_pnl:.2f}\n"
+                f"**Unrealised PnL:** ${unrealised_pnl:.2f}\n"
+                f"**Trades:** {len(df)} (W:{wins}, L:{losses})\n"
+                f"**Open Positions:** {len(self.open_positions)}/{self.max_positions}\n"
+            )
+
+            if self.open_positions:
+                content += "\n**Positions Detail:**\n"
+                for sym, pos in self.open_positions.items():
+                    try:
+                        curr = self.exchange.fetch_ticker(sym)['last']
+                        cost = pos['entry_price'] * pos['size']
+                        pnl = (curr - pos['entry_price']) * pos['size']
+                        roi = (pnl / cost * 100) if cost else 0
+                        content += (
+                            f"• {sym} | TF:{pos['entry_tf']} | Size:{pos['size']:.6f}\n"
+                            f"  Entry:{pos['entry_price']:.4f} Curr:{curr:.4f} "
+                            f"PnL:${pnl:.2f} ({roi:.2f}%)\n"
+                        )
+                    except Exception as e:
+                        print(f"[{datetime.now()}] ❌ Error generating position details for {sym}: {e}")
+                        continue
+
             requests.post(self.discord_webhook, json={'content': content}, timeout=10)
             print(f"[{datetime.now()}] 📢 Discord report sent")
         except Exception as e:
@@ -275,6 +346,7 @@ class SupertrendBot:
         start_ts = time.time()
         print(f"\n[{datetime.now()}] 🔄 Trade Cycle #{self.cycle_count}")
 
+        # Close positions
         for sym, pos in list(self.open_positions.items()):
             try:
                 o = self.exchange.fetch_ohlcv(sym, pos['entry_tf'], limit=50)
@@ -295,7 +367,11 @@ class SupertrendBot:
                             print(f"  ❌ Sell failed {sym}: {e}")
                             continue
                     trade = {
-                        **pos,
+                        'symbol': sym,
+                        'entry_price': pos['entry_price'],
+                        'size': size,
+                        'entry_tf': pos['entry_tf'],
+                        'entry_time': pos['entry_time'],
                         'exit_price': curr['close'],
                         'exit_time': curr['ts'],
                         'pnl': pnl,
@@ -308,6 +384,7 @@ class SupertrendBot:
             except Exception as e:
                 print(f"  ❌ Error closing {sym}: {e}")
 
+        # Open new positions
         open_cnt = len(self.open_positions)
         if open_cnt < self.max_positions:
             needed = self.max_positions - open_cnt
@@ -423,15 +500,14 @@ class SupertrendBot:
             if self.discord_webhook:
                 try:
                     self.send_discord_report()
-                except:
-                    pass
+                except Exception as e:
+                    print(f"[{datetime.now()}] ❌ Final report failed: {e}")
             print(f"[{datetime.now()}] 🛑 Bot stopped")
 
 if __name__ == '__main__':
     # Start Flask server in a separate thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-     
     
     # Initialize and run the trading bot
     bot = SupertrendBot(
@@ -442,4 +518,4 @@ if __name__ == '__main__':
         fee_pct=0.001,
         discord_webhook_url=os.getenv('DISCORD_WEBHOOK_URL')
     )
-    bot.run_live()  
+    bot.run_live()
