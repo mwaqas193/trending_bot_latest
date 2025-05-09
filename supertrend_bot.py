@@ -10,6 +10,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask
 import threading
 
+# … your imports …
+
 # Load environment variables
 load_dotenv()
 
@@ -23,12 +25,31 @@ def health_check():
 def run_flask():
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 10000)))
 
-# Configure result directory for Render or local
-if 'RENDER' in os.environ:
-    RESULT_DIR = '/var/lib/render/supertrend_results'
-else:
-    RESULT_DIR = 'supertrend_result'
-os.makedirs(RESULT_DIR, exist_ok=True)
+# Configure result directory with fallbacks
+RESULT_DIR = None
+possible_dirs = [
+    os.getenv('HOME', ''),      # User home directory
+    '/tmp',                     # System temp directory
+    'supertrend_result'         # Local directory (relative path)
+]
+
+for dir_path in possible_dirs:
+    try:
+        RESULT_DIR = os.path.join(dir_path, 'supertrend_results')
+        os.makedirs(RESULT_DIR, exist_ok=True)
+        print(f"✅ Using results directory: {RESULT_DIR}")
+        break
+    except Exception as e:
+        print(f"⚠️ Couldn't use {dir_path}: {e}")
+
+if not RESULT_DIR:
+    raise RuntimeError("Failed to find suitable directory for results")
+
+# … the rest of your bot startup logic …
+# e.g. threading.Thread(target=run_flask, daemon=True).start()
+#      bot = SupertrendBot(…)
+#      bot.run_live()
+
 
 class SupertrendBot:
     def __init__(
